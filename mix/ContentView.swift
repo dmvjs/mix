@@ -16,16 +16,25 @@ struct ContentView: View {
     @State private var volumeA: Double = 1.0
     @State private var volumeB: Double = 1.0
 
+    /// Tracks which deck currently holds master status.
+    /// Transfers automatically when the master stops or changes track.
+    @State private var masterIsA: Bool = true
+
+    private var aMaster: Bool { masterIsA  && deckA.isPlaying && !aLockedToB }
+    private var bMaster: Bool { !masterIsA && deckB.isPlaying && !bLockedToA }
+
     // MARK: - Master source
 
     private var masterAngle: Double {
+        aMaster ? clockA.angle : bMaster ? clockB.angle :
         deckA.isPlaying ? clockA.angle : deckB.isPlaying ? clockB.angle : clockA.angle
     }
     private var masterLoopIndex: Int {
+        aMaster ? clockA.loopIndex : bMaster ? clockB.loopIndex :
         deckA.isPlaying ? clockA.loopIndex : deckB.isPlaying ? clockB.loopIndex : clockA.loopIndex
     }
     private var masterLabel: String {
-        deckA.isPlaying ? "A" : deckB.isPlaying ? "B" : "·"
+        aMaster ? "A" : bMaster ? "B" : "·"
     }
     private var isAnythingPlaying: Bool { deckA.isPlaying || deckB.isPlaying }
 
@@ -57,11 +66,17 @@ struct ContentView: View {
 
     private func toggleSyncA() {
         aLockedToB.toggle(); bLockedToA = false
-        if aLockedToB { lockSlave(master: clockB, masterDeck: deckB, slave: clockA, slaveDeck: deckA) }
+        if aLockedToB {
+            masterIsA = false  // B is master if A is following it
+            lockSlave(master: clockB, masterDeck: deckB, slave: clockA, slaveDeck: deckA)
+        }
     }
     private func toggleSyncB() {
         bLockedToA.toggle(); aLockedToB = false
-        if bLockedToA { lockSlave(master: clockA, masterDeck: deckA, slave: clockB, slaveDeck: deckB) }
+        if bLockedToA {
+            masterIsA = true   // A is master if B is following it
+            lockSlave(master: clockA, masterDeck: deckA, slave: clockB, slaveDeck: deckB)
+        }
     }
 
     // MARK: - Body
@@ -82,7 +97,7 @@ struct ContentView: View {
                     Color(white: 0.12).frame(width: 0.5)
 
                     DeckView(label: "A",
-                             isMaster: deckA.isPlaying && !aLockedToB,
+                             isMaster: aMaster,
                              syncLocked: aLockedToB,
                              onSync: toggleSyncA,
                              clock: clockA, deck: deckA,
@@ -91,7 +106,7 @@ struct ContentView: View {
                     Color(white: 0.15).frame(width: 0.5)
 
                     DeckView(label: "B",
-                             isMaster: deckB.isPlaying && !deckA.isPlaying && !bLockedToA,
+                             isMaster: bMaster,
                              syncLocked: bLockedToA,
                              onSync: toggleSyncB,
                              clock: clockB, deck: deckB,
@@ -114,10 +129,22 @@ struct ContentView: View {
             continuousSync(masterBeat: beat, slave: clockA)
         }
         .onChange(of: deckA.isPlaying) { _, playing in
-            if !playing && bLockedToA { bLockedToA = false }
+            if playing {
+                // A starts: claim master only if B isn't already playing as master
+                if !deckB.isPlaying { masterIsA = true }
+            } else {
+                // A stops: release lock on B, hand master to B if it's playing
+                if bLockedToA { bLockedToA = false }
+                if deckB.isPlaying { masterIsA = false }
+            }
         }
         .onChange(of: deckB.isPlaying) { _, playing in
-            if !playing && aLockedToB { aLockedToB = false }
+            if playing {
+                if !deckA.isPlaying { masterIsA = false }
+            } else {
+                if aLockedToB { aLockedToB = false }
+                if deckA.isPlaying { masterIsA = true }
+            }
         }
         .onChange(of: volumeA) { _, v in deckA.setVolume(Float(v)) }
         .onChange(of: volumeB) { _, v in deckB.setVolume(Float(v)) }
