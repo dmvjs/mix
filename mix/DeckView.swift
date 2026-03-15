@@ -236,8 +236,12 @@ struct DeckView: View {
         }
         clock.stop()
         deck.pause()
-        try? deck.load(bodyURL: url, loopCount: 4)
-        currentSong = song
+        currentSong = song          // show title immediately
+        let d = deck                // capture reference for background task
+        // File I/O + PCM decode off the main thread — engine stays running (no stop/start)
+        Task.detached(priority: .userInitiated) {
+            try? d.load(bodyURL: url, loopCount: 4)
+        }
     }
 }
 

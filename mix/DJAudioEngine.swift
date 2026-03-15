@@ -77,8 +77,12 @@ final class DJAudioEngine: ObservableObject {
             : leftSamples
 
         try buildSourceNode(format: format)
-        waveform = makeWaveform()
-        isLoaded = true
+        let wf = makeWaveform()
+        // @Published must update on main thread
+        DispatchQueue.main.async { [weak self] in
+            self?.waveform = wf
+            self?.isLoaded = true
+        }
     }
 
     private func makeWaveform(buckets: Int = 1400) -> [Float] {
@@ -178,7 +182,8 @@ final class DJAudioEngine: ObservableObject {
     }
 
     private func buildSourceNode(format: AVAudioFormat) throws {
-        engine.stop()
+        // Detach old node WITHOUT stopping the engine — AVAudioEngine supports live
+        // node swaps. Stopping tears down the hardware audio session and causes glitches.
         if let old = sourceNode { engine.detach(old) }
 
         let node = AVAudioSourceNode(format: format) { [weak self] isSilence, _, frameCount, outputData in
@@ -259,7 +264,7 @@ final class DJAudioEngine: ObservableObject {
         }
         engine.connect(node,   to: eqNode,               format: format)
         engine.connect(eqNode, to: engine.mainMixerNode, format: format)
-        try engine.start()
+        if !engine.isRunning { try engine.start() }
     }
 }
 
