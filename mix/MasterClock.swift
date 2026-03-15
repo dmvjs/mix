@@ -11,6 +11,7 @@ final class MasterClock: ObservableObject {
 
     @Published private(set) var loopFraction: Double = 0  // 0.0 ..< 1.0
     @Published private(set) var loopIndex: Int = 0        // which loop (0-3 for body, 0 for lead)
+    @Published private(set) var absoluteBeat: Double = 0  // raw unbounded beat, for sync lock
 
     // Raw position in beats (unbounded, wraps for display)
     nonisolated(unsafe) private(set) var beatPosition: Double = 0
@@ -49,12 +50,14 @@ final class MasterClock: ObservableObject {
             beatPosition += dt * beatsPerSecond
         }
 
-        let totalLoops = beatPosition / beatsPerLoop
+        let beat  = beatPosition
+        let totalLoops = beat / beatsPerLoop
         let frac  = totalLoops.truncatingRemainder(dividingBy: 1.0)
         let index = Int(totalLoops) % 4
         DispatchQueue.main.async { [weak self] in
             self?.loopFraction = frac < 0 ? frac + 1 : frac
             self?.loopIndex    = index < 0 ? index + 4 : index
+            self?.absoluteBeat = beat
         }
     }
 

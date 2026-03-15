@@ -5,6 +5,7 @@ import SwiftUI
 struct DeckView: View {
     let label: String
     var isMaster: Bool = false
+    var syncLocked: Bool = false
     var onSync: (() -> Void)? = nil
 
     @ObservedObject var clock: MasterClock
@@ -208,12 +209,13 @@ struct DeckView: View {
         Button { onSync?() } label: {
             Image(systemName: "arrow.2.circlepath")
                 .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(isMaster ? Color.white.opacity(0.2) : .white)
+                .foregroundStyle(syncLocked ? Color.green : isMaster ? Color.white.opacity(0.2) : .white)
                 .frame(maxWidth: .infinity)
                 .frame(height: 44)
+                .background(syncLocked ? Color.green.opacity(0.15) : Color.clear)
         }
         .buttonStyle(.plain)
-        .disabled(isMaster)
+        .disabled(isMaster && !syncLocked)
     }
 
     // ── Helpers ────────────────────────────────────────────────────────
