@@ -51,6 +51,7 @@ struct ContentView: View {
         #endif
         let latencyBeats = ioSecs * master.bpm / 60.0
         let newBeat = master.beatPosition + latencyBeats
+
         slave.setBeatPosition(newBeat)
         var audioBeats = newBeat.truncatingRemainder(dividingBy: totalBeats)
         if audioBeats < 0 { audioBeats += totalBeats }
