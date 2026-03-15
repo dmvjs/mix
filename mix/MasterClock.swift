@@ -6,7 +6,7 @@ import QuartzCore
 /// Position is expressed as a fraction 0.0..<1.0 within one loop.
 /// The clock advances at `bpm` beats per minute, where one loop = `beatsPerLoop` beats.
 final class MasterClock: ObservableObject {
-    let bpm: Double
+    var bpm: Double
     let beatsPerLoop: Double   // 16 beats per loop (lead = 1 loop, body = 4 loops)
 
     @Published private(set) var loopFraction: Double = 0  // 0.0 ..< 1.0
@@ -38,6 +38,8 @@ final class MasterClock: ObservableObject {
 
     func stop() {
         isPlaying = false
+        displayTimer?.invalidate()
+        displayTimer = nil
     }
 
     private func tick() {

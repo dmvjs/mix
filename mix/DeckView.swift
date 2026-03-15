@@ -4,292 +4,240 @@ import SwiftUI
 
 struct DeckView: View {
     let label: String
-    var isMaster: Bool = false
-    var syncLocked: Bool = false
-    var onSync: (() -> Void)? = nil
-
     @ObservedObject var clock: MasterClock
     @ObservedObject var deck:  DJAudioEngine
-    @Binding var currentSong: Song?
+    let currentSong: Song?
 
-    @State private var selectedBPM = 94
-    @State private var showPicker  = false
-    @State private var scrubActive = false
-    @State private var prevY: CGFloat  = 0
-    @State private var lineOffset: CGFloat = 0
-    @State private var pulse = false   // drives the red ring animation
+    @State private var volume: Float = 1.0
+
+    // Mirror the waveform's current section hue for the volume column
+    private var currentHue: Double {
+        WaveformStrip.loopHues[clock.loopIndex % 4]
+    }
 
     var body: some View {
-        VStack(spacing: 0) {
-            // ── Scrub zone — waveform + bezier line ───────────────────
-            GeometryReader { geo in
-                ZStack {
-                    WaveformStrip(waveform: deck.waveform,
-                                  currentFrame: deck.currentFrame,
-                                  framesTotal: deck.framesCount)
-                        .allowsHitTesting(false)
+        ZStack(alignment: .bottom) {
+            // ── Waveform fills everything ────────────────────────────────────
+            WaveformStrip(waveform: deck.waveform,
+                          currentFrame: deck.currentFrame,
+                          framesTotal: deck.framesCount,
+                          framesPerLoop: deck.framesPerLoopCount)
 
-                    // Deck label – top leading corner
-                    VStack {
-                        HStack {
-                            Text(label)
-                                .font(.system(size: 10, weight: .bold, design: .rounded))
-                                .foregroundStyle(Color.white.opacity(0.3))
-                                .padding(.leading, 12)
-                                .padding(.top, 10)
-                            Spacer()
-                        }
-                        Spacer()
+            // ── Song info: fades up from black at the bottom ─────────────────
+            VStack(spacing: 0) {
+                LinearGradient(colors: [.clear, Color.black.opacity(0.93)],
+                               startPoint: .top, endPoint: .bottom)
+                    .frame(height: 40)
+
+                if let song = currentSong {
+                    VStack(spacing: 2) {
+                        MarqueeText(text: song.title,
+                                    font: .system(size: 11, weight: .semibold),
+                                    color: .white)
+                        MarqueeText(text: song.artist,
+                                    font: .system(size: 9),
+                                    color: Color.white.opacity(0.38))
+                        Text("\(song.bpm) bpm  ·  key \(song.key)")
+                            .font(.system(size: 8, weight: .medium, design: .monospaced))
+                            .foregroundStyle(Color.white.opacity(0.22))
+                            .lineLimit(1)
                     }
-
-                    DeckScrubLine(offset: lineOffset)
-                        .allowsHitTesting(false)
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, 14)
+                    .padding(.top, 2)
+                    .padding(.bottom, 14)
+                    .background(Color.black.opacity(0.93))
                 }
-                .contentShape(Rectangle())
-                .gesture(
-                    DragGesture(minimumDistance: 4, coordinateSpace: .local)
-                        .onChanged { value in
-                            let y = value.translation.height
-                            if !scrubActive {
-                                scrubActive = true
-                                prevY = y
-                                clock.isScrubbing = true
-                                deck.startScrubbing()
-                                return
-                            }
-                            let dy = y - prevY
-                            prevY = y
-                            let delta = -(dy / geo.size.height) * 2 * .pi * 0.1
-                            clock.scrub(angleDelta: delta)
-                            deck.scrubByAngleDelta(delta)
-                            lineOffset = value.translation.height * 0.1
-                        }
-                        .onEnded { _ in
-                            scrubActive = false
-                            prevY = 0
-                            clock.isScrubbing = false
-                            deck.stopScrubbing()
-                            deck.syncPosition(to: clock.loopFraction)
-                            withAnimation(.spring(response: 0.35, dampingFraction: 0.6)) {
-                                lineOffset = 0
-                            }
-                        }
-                )
             }
 
-            // ── Song title row (fixed height) ─────────────────────────
-            songTitleRow
-                .frame(height: 36)
-                .padding(.horizontal, 12)
-
-            // ── Unified control bar: load | ▐▐ | ▶ | ⇄ ──────────────
-            controlBar
-                .frame(height: 50)
-                .padding(.horizontal, 10)
-                .padding(.bottom, 6)
-
-            // ── Cue strip ─────────────────────────────────────────────
-            CueStrip(isLoaded: deck.isLoaded) { quarter in
-                cue(quarter)
-            }
-            .frame(height: 40)
-            .padding(.horizontal, 10)
-            .padding(.bottom, 12)
-        }
-        .sheet(isPresented: $showPicker) {
-            SongPickerView(selectedBPM: $selectedBPM) { song in
-                showPicker = false
-                load(song: song)
-            }
-        }
-        .onAppear {
-            withAnimation(.easeInOut(duration: 0.7).repeatForever(autoreverses: true)) {
-                pulse = true
-            }
-        }
-    }
-
-    // ── Song title row ─────────────────────────────────────────────────
-
-    @ViewBuilder
-    private var songTitleRow: some View {
-        if let song = currentSong {
-            VStack(spacing: 1) {
-                Text(song.title)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .lineLimit(1)
-                Text(song.artist)
-                    .font(.system(size: 10))
-                    .foregroundStyle(Color(white: 0.5))
-                    .lineLimit(1)
-            }
-            .frame(maxWidth: .infinity)
-        } else {
-            Color.clear
-        }
-    }
-
-    // ── Unified control bar ────────────────────────────────────────────
-
-    private var controlBar: some View {
-        HStack(spacing: 0) {
-            // Load button
-            loadBtn
-            divider
-
-            // Pause
-            transportBtn("pause.fill", enabled: deck.isLoaded) {
-                clock.stop(); deck.pause()
-            }
-            divider
-
-            // Play
-            transportBtn("play.fill", enabled: deck.isLoaded) {
-                clock.start(); deck.play()
-            }
-
-            // Sync — only when provided
-            if onSync != nil {
-                divider
-                syncBtn
-            }
-        }
-        .fixedSize(horizontal: false, vertical: true)
-        .frame(maxWidth: .infinity)
-        .background(.ultraThinMaterial,
-                    in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(Color.white.opacity(0.14), lineWidth: 0.5)
-        )
-    }
-
-    private var divider: some View {
-        Rectangle()
-            .fill(Color.white.opacity(0.12))
-            .frame(width: 0.5, height: 22)
-    }
-
-    // Load / re-load button — pulsing red ring until a song is loaded
-    @ViewBuilder
-    private var loadBtn: some View {
-        Button { showPicker = true } label: {
-            ZStack {
-                if currentSong == nil {
-                    Circle()
-                        .stroke(Color.red.opacity(pulse ? 0.85 : 0.25), lineWidth: 1.5)
-                        .frame(width: 30, height: 30)
+            // ── Volume column — outer edge ────────────────────────────────────
+            HStack(spacing: 0) {
+                if label == "A" {
+                    VolumeColumn(volume: volume, hue: currentHue) { v in
+                        volume = v
+                        deck.setVolume(v)
+                    }
+                    Spacer()
+                } else {
+                    Spacer()
+                    VolumeColumn(volume: volume, hue: currentHue) { v in
+                        volume = v
+                        deck.setVolume(v)
+                    }
                 }
-                // "music.note.list" = open library; distinct from sync's lock icon
-                Image(systemName: "music.note.list")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(.white)
             }
-            .frame(maxWidth: .infinity)
-            .frame(height: 44)
-        }
-        .buttonStyle(.plain)
-    }
-
-    private func transportBtn(_ image: String,
-                               enabled: Bool,
-                               action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: image)
-                .font(.system(size: 15, weight: .medium))
-                .foregroundStyle(enabled ? Color.white : Color.white.opacity(0.3))
-                .frame(maxWidth: .infinity)
-                .frame(height: 44)
-        }
-        .buttonStyle(.plain)
-        .disabled(!enabled)
-    }
-
-    private var syncBtn: some View {
-        Button { onSync?() } label: {
-            // lock.fill = actively locked, lock = available to lock
-            Image(systemName: syncLocked ? "lock.fill" : "lock")
-                .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(syncLocked ? Color.green : isMaster ? Color.white.opacity(0.2) : .white)
-                .frame(maxWidth: .infinity)
-                .frame(height: 44)
-                .background(syncLocked ? Color.green.opacity(0.12) : Color.clear)
-        }
-        .buttonStyle(.plain)
-        .disabled(isMaster && !syncLocked)
-    }
-
-    // ── Helpers ────────────────────────────────────────────────────────
-
-    private func cue(_ quarter: Int) {
-        clock.jumpToQuarter(quarter)
-        deck.seekToQuarter(quarter)
-        clock.start()
-        deck.play()
-    }
-
-    private func load(song: Song) {
-        guard let url = Bundle.main.url(forResource: song.bodyResource, withExtension: "mp3") else {
-            print("⚠️  Missing \(song.bodyResource).mp3")
-            return
-        }
-        clock.stop()
-        deck.pause()
-        currentSong = song          // show title immediately
-        let d = deck                // capture reference for background task
-        // File I/O + PCM decode off the main thread — engine stays running (no stop/start)
-        Task.detached(priority: .userInitiated) {
-            try? d.load(bodyURL: url, loopCount: 4)
         }
     }
 }
 
-// MARK: - Waveform strip  (vertical — scrolls in the scrub direction)
-//
-// Each row = one time bucket. Bar WIDTH = amplitude. Time flows top→bottom
-// as playback advances: past content scrolls off the top, future rises from below.
-// The scrub gesture directly controls scroll speed and direction.
+// MARK: - Scrolling marquee text
+
+private struct MarqueeText: View {
+    let text:  String
+    let font:  Font
+    let color: Color
+
+    @State private var offset: CGFloat = 0
+    @State private var textW:  CGFloat = 0
+    @State private var boxW:   CGFloat = 0
+
+    // px/s scroll speed; pause at start/end in seconds
+    private static let speed: CGFloat = 28
+    private static let pause: Double  = 1.8
+
+    var body: some View {
+        GeometryReader { geo in
+            let needsScroll = textW > geo.size.width
+
+            ZStack(alignment: .leading) {
+                // Invisible size probe
+                Text(text)
+                    .font(font)
+                    .fixedSize()
+                    .hidden()
+                    .background(
+                        GeometryReader { tp in
+                            Color.clear.onAppear { textW = tp.size.width }
+                                       .onChange(of: tp.size.width) { textW = $0 }
+                        }
+                    )
+
+                Text(text)
+                    .font(font)
+                    .foregroundStyle(color)
+                    .fixedSize()
+                    .offset(x: needsScroll ? offset : 0)
+            }
+            .frame(width: geo.size.width, alignment: .leading)
+            .clipped()
+            .mask(
+                LinearGradient(
+                    stops: [
+                        .init(color: .black, location: 0),
+                        .init(color: .black, location: needsScroll ? 0.82 : 1),
+                        .init(color: .clear,  location: needsScroll ? 1.0  : 1),
+                    ],
+                    startPoint: .leading, endPoint: .trailing
+                )
+            )
+            .onAppear { boxW = geo.size.width }
+            .onChange(of: geo.size.width) { boxW = $0 }
+        }
+        .frame(height: 16)
+        .task(id: text) {
+            offset = 0
+            guard textW > boxW else { return }
+            // brief pause at the start
+            try? await Task.sleep(for: .seconds(Self.pause))
+            while !Task.isCancelled {
+                let travel   = textW - boxW + 14   // +14 for fade clearance
+                let duration = Double(travel / Self.speed)
+                withAnimation(.linear(duration: duration)) { offset = -travel }
+                try? await Task.sleep(for: .seconds(duration + Self.pause))
+                withAnimation(.linear(duration: 0.18)) { offset = 0 }
+                try? await Task.sleep(for: .seconds(0.18 + Self.pause))
+            }
+        }
+    }
+}
+
+// MARK: - Vertical volume bar
+
+private struct VolumeColumn: View {
+    let volume:   Float
+    let hue:      Double
+    let onChange: (Float) -> Void
+
+    private let touchW: CGFloat = 44
+    private let barW:   CGFloat = 3
+
+    var body: some View {
+        GeometryReader { geo in
+            let trackH = geo.size.height * 0.58
+            let topY   = (geo.size.height - trackH) / 2
+            let fillH  = max(barW, CGFloat(volume) * trackH)
+            let accent = Color(hue: hue, saturation: 0.72, brightness: 1.0)
+
+            ZStack {
+                // Inner ZStack: fills from bottom up, centered by outer ZStack
+                ZStack(alignment: .bottom) {
+                    // Ghost track
+                    Capsule()
+                        .fill(Color.white.opacity(0.08))
+                        .frame(width: barW, height: trackH)
+                    // Glow
+                    Capsule()
+                        .fill(accent.opacity(0.42))
+                        .frame(width: 12, height: fillH)
+                        .blur(radius: 6)
+                    // Fill
+                    Capsule()
+                        .fill(accent)
+                        .frame(width: barW, height: fillH)
+                }
+                .frame(width: touchW, height: trackH)
+                // outer ZStack default-centers the inner one
+            }
+            .frame(width: touchW, height: geo.size.height)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { drag in
+                        let t = 1.0 - (drag.location.y - topY) / trackH
+                        onChange(Float(max(0, min(1, t))))
+                    }
+            )
+        }
+        .frame(width: touchW)
+    }
+}
+
+// MARK: - Waveform strip (vertical — scrolls with playback)
 
 struct WaveformStrip: View {
-    let waveform: [Float]
-    let currentFrame: Int
-    let framesTotal: Int
+    let waveform:      [Float]
+    let currentFrame:  Int
+    let framesTotal:   Int
+    let framesPerLoop: Int
 
-    // Each of the 4 body loops has its own hue identity
-    private static let loopHues: [Double] = [0.60, 0.52, 0.33, 0.08]  // blue, teal, green, amber
+    /// Shared with VolumeColumn so slider color always echoes the waveform
+    static let loopHues: [Double] = [0.60, 0.52, 0.33, 0.08]  // blue, teal, green, amber
 
     var body: some View {
         TimelineView(.animation(minimumInterval: 1.0 / 30)) { _ in
             Canvas { ctx, size in
                 guard !waveform.isEmpty, framesTotal > 0 else { return }
 
-                let buckets    = waveform.count
-                let rowH: CGFloat = 3
-                let gap: CGFloat  = 1
-                let stride        = rowH + gap
-                let halfRows      = Int(size.height / stride / 2) + 2
-                let progress      = Double(currentFrame) / Double(framesTotal)
-                let centerBucket  = Int(progress * Double(buckets))
-                let cy            = size.height / 2
+                let buckets     = waveform.count
+                let perLoop     = max(1, framesPerLoop)
+                let numLoops    = max(1, framesTotal / perLoop)
+                let loopIdx     = (currentFrame / perLoop) % numLoops
+                let loopProg    = Double(currentFrame % perLoop) / Double(perLoop)
+                let bktsPerLoop = buckets / numLoops
+                let centerBucket = loopIdx * bktsPerLoop + Int(loopProg * Double(bktsPerLoop))
+
+                let rowH:     CGFloat = 3
+                let gap:      CGFloat = 1
+                let stride    = rowH + gap
+                let halfRows  = Int(size.height / stride / 2) + 2
+                let cy        = size.height / 2
 
                 for offset in -halfRows ... halfRows {
                     let raw    = centerBucket + offset
                     let bucket = ((raw % buckets) + buckets) % buckets
                     let amp    = CGFloat(waveform[bucket])
 
-                    // Horizontal bar, centered, width = amplitude
-                    let barW   = max(3, amp * size.width * 0.88)
-                    let x      = (size.width - barW) / 2
-                    let y      = cy + CGFloat(offset) * stride
+                    let barW = max(3, amp * size.width * 0.88)
+                    let x    = (size.width - barW) / 2
+                    let y    = cy + CGFloat(offset) * stride
 
-                    let loopIdx = Int(Double(bucket) / Double(buckets) * 4) % 4
-                    let hue     = Self.loopHues[loopIdx]
-                    let isPast  = offset < 0   // above center = already played
-                    let color   = Color(hue: hue,
-                                        saturation: isPast ? 0.25 : 0.55,
-                                        brightness: isPast ? 0.4  : 0.95)
-                                  .opacity(isPast ? 0.28 : 0.72)
+                    let colorLoop = Int(Double(bucket) / Double(buckets) * 4) % 4
+                    let hue       = Self.loopHues[colorLoop]
+                    let isPast    = offset < 0
+                    let color     = Color(hue: hue,
+                                          saturation: isPast ? 0.25 : 0.55,
+                                          brightness: isPast ? 0.4  : 0.95)
+                                    .opacity(isPast ? 0.28 : 0.72)
 
                     var bar = Path()
                     bar.addRoundedRect(in: CGRect(x: x, y: y - rowH / 2,
@@ -298,68 +246,6 @@ struct WaveformStrip: View {
                     ctx.fill(bar, with: .color(color))
                 }
             }
-        }
-    }
-}
-
-// MARK: - Cue strip
-
-struct CueStrip: View {
-    let isLoaded: Bool
-    let onCue: (Int) -> Void
-
-    private let labels = ["0", "¼", "½", "¾"]
-
-    var body: some View {
-        HStack(spacing: 0) {
-            ForEach(0..<4, id: \.self) { i in
-                Button { onCue(i) } label: {
-                    Text(labels[i])
-                        .font(.system(size: 15, weight: .medium, design: .rounded))
-                        .foregroundStyle(.white)
-                        .frame(maxWidth: .infinity)
-                        .frame(maxHeight: .infinity)
-                }
-                .buttonStyle(.plain)
-
-                if i < 3 {
-                    Rectangle()
-                        .fill(Color.white.opacity(0.12))
-                        .frame(width: 0.5, height: 22)
-                }
-            }
-        }
-        .background(.ultraThinMaterial,
-                    in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(Color.white.opacity(0.14), lineWidth: 0.5)
-        )
-        .opacity(isLoaded ? 1 : 0.4)
-        .disabled(!isLoaded)
-    }
-}
-
-// MARK: - Scrub line
-
-struct DeckScrubLine: View {
-    let offset: CGFloat
-
-    var body: some View {
-        Canvas { ctx, size in
-            let cy    = size.height / 2
-            let left  = size.width * 0.1
-            let right = size.width * 0.9
-            let mid   = size.width / 2
-
-            var path = Path()
-            path.move(to: CGPoint(x: left, y: cy))
-            path.addCurve(
-                to: CGPoint(x: right, y: cy),
-                control1: CGPoint(x: mid - size.width * 0.15, y: cy + offset),
-                control2: CGPoint(x: mid + size.width * 0.15, y: cy + offset)
-            )
-            ctx.stroke(path, with: .color(.white), lineWidth: 1)
         }
     }
 }

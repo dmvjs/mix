@@ -23,13 +23,16 @@ final class DJAudioEngine: ObservableObject {
     @Published var isPlaying: Bool = false
     @Published private(set) var waveform: [Float] = []
 
-    // Audio data — immutable after load, safe from any thread
-    private var leftSamples:  [Float] = []
-    private var rightSamples: [Float] = []
+    // Audio data — written from background threads (commitStaged/load), read on render thread.
+    // Safe because renderGain is set to 0 before any swap, so the render callback is silent
+    // (needsRender = false) and never accessing these arrays when they are being replaced.
+    nonisolated(unsafe) private var leftSamples:  [Float] = []
+    nonisolated(unsafe) private var rightSamples: [Float] = []
     nonisolated(unsafe) private var framesTotal:   Int = 0
     nonisolated(unsafe) private var framesPerLoop: Int = 0
 
-    var framesCount: Int { framesTotal }
+    var framesCount:        Int { framesTotal }
+    var framesPerLoopCount: Int { framesPerLoop }
 
     // Render-thread state
     nonisolated(unsafe) private var lastRenderRate: Double = 0
@@ -46,8 +49,8 @@ final class DJAudioEngine: ObservableObject {
     // Seeks are deferred until renderGain < silence threshold.
     nonisolated(unsafe) private var renderGain: Float = 0.0
     nonisolated(unsafe) private var gainTarget: Float = 0.0
-    // ~5 ms fade at 44100 Hz (1/220 per sample → 220 samples to full ramp)
-    private static let gainStep: Float = 1.0 / 220.0
+    // ~10 ms fade at 44100 Hz (1/441 per sample → 441 samples to full ramp)
+    private static let gainStep: Float = 1.0 / 441.0
 
     // Channel volume (0..2). Applied per-sample in the render callback — more
     // reliable than engine.mainMixerNode.volume across multiple engine instances.
@@ -70,6 +73,15 @@ final class DJAudioEngine: ObservableObject {
     private var eqReady = false
     private var sourceNode: AVAudioSourceNode?
 
+    // Format of the currently running source node — used to skip node rebuild when
+    // a new track has the same format (avoids engine graph churn on every transition)
+    private var lastBuiltFormat: AVAudioFormat? = nil
+
+    // Scheduled after pause() — stops the engine ~30ms later so the hardware output
+    // goes fully silent and the EQ/mixer chain stops generating any residual signal.
+    // Cancelled immediately if play() is called before it fires.
+    private var pauseWorkItem: DispatchWorkItem?
+
     init() {
         setupAudioSession()
         setupEQBands()
@@ -78,6 +90,8 @@ final class DJAudioEngine: ObservableObject {
     // MARK: - Load
 
     func load(bodyURL: URL, loopCount: Int) throws {
+        pauseWorkItem?.cancel()
+        pauseWorkItem = nil
         let file   = try AVAudioFile(forReading: bodyURL)
         let format = file.processingFormat
         let count  = AVAudioFrameCount(file.length)
@@ -93,22 +107,123 @@ final class DJAudioEngine: ObservableObject {
             ? Array(UnsafeBufferPointer(start: data[1], count: framesTotal))
             : leftSamples
 
+        // Zero gain + position before node swap → no click from abrupt detach
+        gainTarget = 0.0
+        renderGain = 0.0
+        renderPos  = 0
+
+        // Clear any stale staging so hasStaged reflects reality after a fallback load
+        stagingLeft    = []
+        stagingRight   = []
+        stagingFormat  = nil
+
         try buildSourceNode(format: format)
-        let wf = makeWaveform()
+        // 1400 buckets per loop → body (4 loops) gets 5600 buckets, matching lead zoom
+        let wf = makeWaveform(leftSamples, total: framesTotal, buckets: 1400 * loopCount)
         DispatchQueue.main.async { [weak self] in
             self?.waveform = wf
             self?.isLoaded = true
         }
     }
 
-    private func makeWaveform(buckets: Int = 1400) -> [Float] {
-        guard framesTotal > 0 else { return [] }
-        let step = max(1, framesTotal / buckets)
+    // MARK: - Staging (pre-decode without touching the live engine)
+
+    // Decoded samples waiting to replace the live buffers at the next transition.
+    nonisolated(unsafe) private var stagingLeft:     [Float] = []
+    nonisolated(unsafe) private var stagingRight:    [Float] = []
+    nonisolated(unsafe) private var stagingTotal:    Int = 0
+    nonisolated(unsafe) private var stagingPerLoop:  Int = 0
+    nonisolated(unsafe) private var stagingFormat:   AVAudioFormat? = nil
+    nonisolated(unsafe) private var stagingWaveform: [Float] = []
+
+    var hasStaged: Bool { stagingFormat != nil }
+
+    /// Wipe any previously completed staging so stale content can never be committed.
+    func clearStaging() {
+        stagingLeft    = []
+        stagingRight   = []
+        stagingFormat  = nil
+    }
+
+    /// Decode audio into staging buffers without touching the live engine.
+    /// Call from any background thread while the deck is still playing.
+    /// Throws CancellationError if the enclosing Task was cancelled during decode.
+    func stage(url: URL, loopCount: Int) throws {
+        let file   = try AVAudioFile(forReading: url)
+        let format = file.processingFormat
+        let count  = AVAudioFrameCount(file.length)
+        guard let buf = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: count) else { return }
+        try file.read(into: buf)
+
+        let n    = Int(count)
+        let data = buf.floatChannelData!
+        let left  = Array(UnsafeBufferPointer(start: data[0], count: n))
+        let right = format.channelCount > 1
+            ? Array(UnsafeBufferPointer(start: data[1], count: n))
+            : left
+        let wf = makeWaveform(left, total: n, buckets: 1400 * loopCount)
+
+        // Discard if the task was cancelled while decoding — prevents a stale
+        // background task from overwriting fresh staging with wrong-tempo content.
+        try Task.checkCancellation()
+
+        stagingLeft     = left
+        stagingRight    = right
+        stagingTotal    = n
+        stagingPerLoop  = max(1, n / loopCount)
+        stagingFormat   = format
+        stagingWaveform = wf
+    }
+
+    /// Swap staged buffers into the live engine — no file I/O, near-instant.
+    /// Call from a background thread (same as load).
+    func commitStaged() throws {
+        guard !stagingLeft.isEmpty, let fmt = stagingFormat else { return }
+
+        framesTotal   = stagingTotal
+        framesPerLoop = stagingPerLoop
+        renderPos     = 0
+
+        // Swap the sample arrays.  Safe because renderGain is forced to 0 last —
+        // the render callback returns isSilence before touching leftSamples/rightSamples
+        // once it sees renderGain == 0.
+        leftSamples  = stagingLeft
+        rightSamples = stagingRight
+
+        // Write renderGain = 0 last so the render sees consistent state.
+        gainTarget = 0.0
+        renderGain = 0.0
+
+        // Only rebuild the AVAudioSourceNode when the format actually changed
+        // (different sample rate or channel count).  Skipping the rebuild eliminates
+        // the engine.detach/attach churn that caused the transition gap and click.
+        let formatChanged = lastBuiltFormat.map {
+            $0.sampleRate != fmt.sampleRate || $0.channelCount != fmt.channelCount
+        } ?? true
+        if formatChanged || sourceNode == nil {
+            try buildSourceNode(format: fmt)
+        }
+
+        let wf = stagingWaveform
+        DispatchQueue.main.async { [weak self] in
+            self?.waveform = wf
+            self?.isLoaded = true
+        }
+
+        // Clear staging
+        stagingLeft    = []
+        stagingRight   = []
+        stagingFormat  = nil
+    }
+
+    private func makeWaveform(_ samples: [Float], total: Int, buckets: Int = 1400) -> [Float] {
+        guard total > 0 else { return [] }
+        let step = max(1, total / buckets)
         return (0..<buckets).map { i in
             let start = i * step
-            let end   = min(start + step, framesTotal)
+            let end   = min(start + step, total)
             var peak: Float = 0
-            for j in start..<end { peak = max(peak, abs(leftSamples[j])) }
+            for j in start..<end { peak = max(peak, abs(samples[j])) }
             return peak
         }
     }
@@ -116,6 +231,9 @@ final class DJAudioEngine: ObservableObject {
     // MARK: - Transport
 
     func play() {
+        pauseWorkItem?.cancel()
+        pauseWorkItem = nil
+        if !engine.isRunning { try? engine.start() }
         playing    = true
         gainTarget = 1.0   // render will ramp up smoothly
         isPlaying  = true
@@ -125,6 +243,16 @@ final class DJAudioEngine: ObservableObject {
         playing    = false
         gainTarget = 0.0   // render ramps to silence, then stays silent
         isPlaying  = false
+
+        // After the gain fully fades (~10 ms) plus margin, stop the engine entirely.
+        // This kills the EQ/mixer render chain and eliminates any hardware buzz that
+        // persists after the source signal reaches zero.  Cancelled if play() fires first.
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, !self.playing else { return }
+            self.engine.pause()
+        }
+        pauseWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.030, execute: work)
     }
 
     // MARK: - Volume & EQ
@@ -182,10 +310,7 @@ final class DJAudioEngine: ObservableObject {
     // MARK: - Private
 
     private func setupAudioSession() {
-        #if os(iOS)
-        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
-        try? AVAudioSession.sharedInstance().setActive(true)
-        #endif
+        // Session is configured app-wide in mixApp.init(); nothing extra needed per-deck.
     }
 
     private func setupEQBands() {
@@ -195,6 +320,7 @@ final class DJAudioEngine: ObservableObject {
     }
 
     private func buildSourceNode(format: AVAudioFormat) throws {
+        lastBuiltFormat = format
         if let old = sourceNode { engine.detach(old) }   // live swap — no engine.stop()
 
         let node = AVAudioSourceNode(format: format) { [weak self] isSilence, _, frameCount, outputData in
@@ -266,6 +392,13 @@ final class DJAudioEngine: ObservableObject {
             let finalRate = abs(rate) < 1e-4 ? 0.0 : rate
             self.lastRenderRate = finalRate
 
+            // During pause fade-out: keep advancing at rate 1 so the waveform continues
+            // naturally through silence — a frozen position outputs repeated samples (DC),
+            // which buzzes. Threshold matches needsRender so position never freezes while
+            // audio is still being output.
+            let fadingOut = !self.playing && !self.scrubbing && self.renderGain > 0.0
+            let advanceRate = fadingOut ? 1.0 : finalRate
+
             // ── Fill output with Hermite interpolation + gain envelope ────
             var pos  = self.renderPos
             var gain = self.renderGain
@@ -286,11 +419,14 @@ final class DJAudioEngine: ObservableObject {
                     let i2  = i1 < totalInt-1 ? i1 + 1 : 0
                     let mu  = Float(p - Double(i0))
 
+                    // S-curve (cubic Hermite): smoothGain = 3g²-2g³
+                    // Zero derivative at g=0 and g=1 → no spectral click at fade endpoints
+                    let sg  = gain * gain * (3 - 2 * gain)
                     let vol = self.outputVolume
-                    left[i]   = hermite(mu, lp[im1], lp[i0], lp[i1], lp[i2]) * gain * vol
-                    right?[i] = hermite(mu, rp[im1], rp[i0], rp[i1], rp[i2]) * gain * vol
+                    left[i]   = hermite(mu, lp[im1], lp[i0], lp[i1], lp[i2]) * sg * vol
+                    right?[i] = hermite(mu, rp[im1], rp[i0], rp[i1], rp[i2]) * sg * vol
 
-                    pos += finalRate
+                    pos += advanceRate  // frozen at 0 during pause fade-out
                 }
             }}
 
