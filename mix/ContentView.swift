@@ -43,19 +43,9 @@ struct ContentView: View {
     private func lockSlave(master: MasterClock, masterDeck: DJAudioEngine,
                            slave: MasterClock,  slaveDeck:  DJAudioEngine) {
         guard masterDeck.isPlaying else { return }
-        let totalBeats = master.beatsPerLoop * 4
-        #if os(iOS)
-        let ioSecs = AVAudioSession.sharedInstance().ioBufferDuration
-        #else
-        let ioSecs = 512.0 / 44100.0
-        #endif
-        let latencyBeats = ioSecs * master.bpm / 60.0
-        let newBeat = master.beatPosition + latencyBeats
-
-        slave.setBeatPosition(newBeat)
-        var audioBeats = newBeat.truncatingRemainder(dividingBy: totalBeats)
-        if audioBeats < 0 { audioBeats += totalBeats }
-        slaveDeck.seekToAbsoluteFraction(audioBeats / totalBeats)
+        // Render callback mirrors master.renderPos directly each buffer — no seek needed.
+        slaveDeck.syncMaster = masterDeck
+        slave.setBeatPosition(master.beatPosition)
         slave.start()
         slaveDeck.play()
     }
@@ -69,15 +59,19 @@ struct ContentView: View {
     private func toggleSyncA() {
         aLockedToB.toggle(); bLockedToA = false
         if aLockedToB {
-            masterIsA = false  // B is master if A is following it
+            masterIsA = false
             lockSlave(master: clockB, masterDeck: deckB, slave: clockA, slaveDeck: deckA)
+        } else {
+            deckA.syncMaster = nil
         }
     }
     private func toggleSyncB() {
         bLockedToA.toggle(); aLockedToB = false
         if bLockedToA {
-            masterIsA = true   // A is master if B is following it
+            masterIsA = true
             lockSlave(master: clockA, masterDeck: deckA, slave: clockB, slaveDeck: deckB)
+        } else {
+            deckB.syncMaster = nil
         }
     }
 
@@ -132,11 +126,9 @@ struct ContentView: View {
         }
         .onChange(of: deckA.isPlaying) { _, playing in
             if playing {
-                // A starts: claim master only if B isn't already playing as master
                 if !deckB.isPlaying { masterIsA = true }
             } else {
-                // A stops: release lock on B, hand master to B if it's playing
-                if bLockedToA { bLockedToA = false }
+                if bLockedToA { bLockedToA = false; deckB.syncMaster = nil }
                 if deckB.isPlaying { masterIsA = false }
             }
         }
@@ -144,7 +136,7 @@ struct ContentView: View {
             if playing {
                 if !deckA.isPlaying { masterIsA = false }
             } else {
-                if aLockedToB { aLockedToB = false }
+                if aLockedToB { aLockedToB = false; deckA.syncMaster = nil }
                 if deckA.isPlaying { masterIsA = true }
             }
         }

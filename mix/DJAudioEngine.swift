@@ -32,7 +32,6 @@ final class DJAudioEngine: ObservableObject {
     var framesCount: Int { framesTotal }
 
     // Render-thread state
-    nonisolated(unsafe) private var renderPos:      Double = 0
     nonisolated(unsafe) private var lastRenderRate: Double = 0
 
     // Transport intent (set from main thread, read on render thread)
@@ -56,6 +55,13 @@ final class DJAudioEngine: ObservableObject {
 
     // Pending seek — applied only when renderGain is near zero to avoid position-jump clicks
     nonisolated(unsafe) private var pendingSeek: Int = -1
+
+    // When set, this deck's render callback mirrors the master's renderPos each buffer.
+    // Direct render-thread position sharing — no drift, no beat arithmetic.
+    nonisolated(unsafe) weak var syncMaster: DJAudioEngine?
+
+    // Exposed so a synced slave can read it from its own render callback
+    nonisolated(unsafe) private(set) var renderPos: Double = 0
 
     nonisolated(unsafe) private(set) var currentFrame: Int = 0
 
@@ -204,6 +210,13 @@ final class DJAudioEngine: ObservableObject {
             let total    = Double(self.framesTotal)
             let totalInt = self.framesTotal
             let step     = Self.gainStep
+
+            // ── Sync: mirror master's sample position each buffer ────────
+            // Reads master.renderPos directly — no drift, no beat arithmetic.
+            // Skipped while manually scrubbing so the user can manipulate freely.
+            if let master = self.syncMaster, !self.scrubbing {
+                self.renderPos = master.renderPos
+            }
 
             // ── Gain target this buffer ───────────────────────────────────
             // A pending seek must wait until the gain has ramped to zero so the
