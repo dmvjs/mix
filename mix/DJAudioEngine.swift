@@ -50,6 +50,10 @@ final class DJAudioEngine: ObservableObject {
     // ~5 ms fade at 44100 Hz (1/220 per sample → 220 samples to full ramp)
     private static let gainStep: Float = 1.0 / 220.0
 
+    // Channel volume (0..2). Applied per-sample in the render callback — more
+    // reliable than engine.mainMixerNode.volume across multiple engine instances.
+    nonisolated(unsafe) private var outputVolume: Float = 1.0
+
     // Pending seek — applied only when renderGain is near zero to avoid position-jump clicks
     nonisolated(unsafe) private var pendingSeek: Int = -1
 
@@ -120,7 +124,7 @@ final class DJAudioEngine: ObservableObject {
     // MARK: - Volume & EQ
 
     func setVolume(_ v: Float) {
-        engine.mainMixerNode.volume = max(0, min(2, v))
+        outputVolume = max(0, min(2, v))
     }
 
     func setEQ(_ s: EQSettings) {
@@ -269,8 +273,9 @@ final class DJAudioEngine: ObservableObject {
                     let i2  = i1 < totalInt-1 ? i1 + 1 : 0
                     let mu  = Float(p - Double(i0))
 
-                    left[i]   = hermite(mu, lp[im1], lp[i0], lp[i1], lp[i2]) * gain
-                    right?[i] = hermite(mu, rp[im1], rp[i0], rp[i1], rp[i2]) * gain
+                    let vol = self.outputVolume
+                    left[i]   = hermite(mu, lp[im1], lp[i0], lp[i1], lp[i2]) * gain * vol
+                    right?[i] = hermite(mu, rp[im1], rp[i0], rp[i1], rp[i2]) * gain * vol
 
                     pos += finalRate
                 }

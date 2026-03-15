@@ -59,8 +59,9 @@ struct ContentView: View {
         slaveDeck.play()
     }
 
-    private func continuousSync(masterBeat: Double, slave: MasterClock) {
-        guard !slave.isScrubbing else { return }
+    private func continuousSync(masterBeat: Double, master: MasterClock, slave: MasterClock) {
+        // Don't sync while either deck is being manipulated
+        guard !master.isScrubbing, !slave.isScrubbing else { return }
         slave.setBeatPosition(masterBeat)
     }
 
@@ -122,11 +123,11 @@ struct ContentView: View {
         }
         .onChange(of: clockA.absoluteBeat) { _, beat in
             guard bLockedToA else { return }
-            continuousSync(masterBeat: beat, slave: clockB)
+            continuousSync(masterBeat: beat, master: clockA, slave: clockB)
         }
         .onChange(of: clockB.absoluteBeat) { _, beat in
             guard aLockedToB else { return }
-            continuousSync(masterBeat: beat, slave: clockA)
+            continuousSync(masterBeat: beat, master: clockB, slave: clockA)
         }
         .onChange(of: deckA.isPlaying) { _, playing in
             if playing {
