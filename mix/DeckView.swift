@@ -20,10 +20,9 @@ struct DeckView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // ── Scrub zone — waveform lives here, bezier floats on top ──
+            // ── Scrub zone — waveform + bezier line ───────────────────
             GeometryReader { geo in
                 ZStack {
-                    // Waveform scrolls vertically with playback / scrub
                     WaveformStrip(waveform: deck.waveform,
                                   currentFrame: deck.currentFrame,
                                   framesTotal: deck.framesCount)
@@ -42,7 +41,6 @@ struct DeckView: View {
                         Spacer()
                     }
 
-                    // Bezier scrub line on top
                     DeckScrubLine(offset: lineOffset)
                         .allowsHitTesting(false)
                 }
@@ -60,10 +58,10 @@ struct DeckView: View {
                             }
                             let dy = y - prevY
                             prevY = y
-                            let delta = -(dy / geo.size.height) * 2 * .pi * 0.25
+                            let delta = -(dy / geo.size.height) * 2 * .pi * 0.1
                             clock.scrub(angleDelta: delta)
                             deck.scrubByAngleDelta(delta)
-                            lineOffset = value.translation.height * 0.25
+                            lineOffset = value.translation.height * 0.1
                         }
                         .onEnded { _ in
                             scrubActive = false
@@ -78,54 +76,22 @@ struct DeckView: View {
                 )
             }
 
-            // ── Info row: wheel + song + sync ─────────────────────────
-            HStack(spacing: 10) {
-                MasterWheelView(angle: clock.angle,
-                                loopIndex: clock.loopIndex,
-                                size: 36)
-                    .opacity(deck.isLoaded ? 1 : 0.3)
+            // ── Song title row (fixed height) ─────────────────────────
+            songTitleRow
+                .frame(height: 36)
+                .padding(.horizontal, 12)
 
-                loadButton
-
-                Spacer()
-
-                // Sync button — disabled when this deck is the master
-                if onSync != nil {
-                    Button {
-                        onSync?()
-                    } label: {
-                        Image(systemName: "arrow.2.circlepath")
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(isMaster ? Color.white.opacity(0.2) : .white)
-                            .frame(width: 34, height: 34)
-                            .background(.ultraThinMaterial, in: Circle())
-                            .overlay(
-                                Circle()
-                                    .stroke(Color.white.opacity(isMaster ? 0.06 : 0.14),
-                                            lineWidth: 0.5)
-                            )
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(isMaster)
-                }
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-
-            // ── Transport — just above cue strip ──────────────────────
-            DeckTransportBar(
-                isLoaded: deck.isLoaded,
-                onPause: { clock.stop();  deck.pause() },
-                onPlay:  { clock.start(); deck.play()  }
-            )
-            .frame(maxWidth: .infinity)
-            .padding(.horizontal, 10)
-            .padding(.bottom, 6)
+            // ── Unified control bar: load | ▐▐ | ▶ | ⇄ ──────────────
+            controlBar
+                .frame(height: 50)
+                .padding(.horizontal, 10)
+                .padding(.bottom, 6)
 
             // ── Cue strip ─────────────────────────────────────────────
             CueStrip(isLoaded: deck.isLoaded) { quarter in
                 cue(quarter)
             }
+            .frame(height: 40)
             .padding(.horizontal, 10)
             .padding(.bottom, 12)
         }
@@ -142,52 +108,112 @@ struct DeckView: View {
         }
     }
 
-    // ── Load button (pulsing red ring until song loaded) ───────────────
+    // ── Song title row ─────────────────────────────────────────────────
 
     @ViewBuilder
-    private var loadButton: some View {
-        Button { showPicker = true } label: {
-            if let song = currentSong {
-                VStack(spacing: 2) {
-                    Text(song.title)
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(.white)
-                    Text(song.artist)
-                        .font(.system(size: 11))
-                        .foregroundStyle(Color(white: 0.55))
-                }
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 7)
-                .background(.ultraThinMaterial,
-                            in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .stroke(Color.white.opacity(0.12), lineWidth: 0.5)
-                )
-            } else {
-                ZStack {
-                    // Pulsing red ring
-                    Circle()
-                        .stroke(Color.red.opacity(pulse ? 0.85 : 0.25), lineWidth: 1.5)
-                        .frame(width: 46, height: 46)
+    private var songTitleRow: some View {
+        if let song = currentSong {
+            VStack(spacing: 1) {
+                Text(song.title)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                Text(song.artist)
+                    .font(.system(size: 10))
+                    .foregroundStyle(Color(white: 0.5))
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity)
+        } else {
+            Color.clear
+        }
+    }
 
-                    // Glass circle button
-                    Circle()
-                        .fill(.ultraThinMaterial)
-                        .frame(width: 38, height: 38)
-                        .overlay(
-                            Circle()
-                                .stroke(Color.white.opacity(0.12), lineWidth: 0.5)
-                        )
+    // ── Unified control bar ────────────────────────────────────────────
 
-                    Image(systemName: "plus")
-                        .font(.system(size: 16, weight: .medium))
-                        .foregroundStyle(.white)
-                }
+    private var controlBar: some View {
+        HStack(spacing: 0) {
+            // Load button
+            loadBtn
+            divider
+
+            // Pause
+            transportBtn("pause.fill", enabled: deck.isLoaded) {
+                clock.stop(); deck.pause()
+            }
+            divider
+
+            // Play
+            transportBtn("play.fill", enabled: deck.isLoaded) {
+                clock.start(); deck.play()
+            }
+
+            // Sync — only when provided
+            if onSync != nil {
+                divider
+                syncBtn
             }
         }
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(maxWidth: .infinity)
+        .background(.ultraThinMaterial,
+                    in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Color.white.opacity(0.14), lineWidth: 0.5)
+        )
+    }
+
+    private var divider: some View {
+        Rectangle()
+            .fill(Color.white.opacity(0.12))
+            .frame(width: 0.5, height: 22)
+    }
+
+    // Load / re-load button — pulsing red ring until a song is loaded
+    @ViewBuilder
+    private var loadBtn: some View {
+        Button { showPicker = true } label: {
+            ZStack {
+                if currentSong == nil {
+                    Circle()
+                        .stroke(Color.red.opacity(pulse ? 0.85 : 0.25), lineWidth: 1.5)
+                        .frame(width: 30, height: 30)
+                }
+                Image(systemName: currentSong == nil ? "plus" : "arrow.triangle.2.circlepath")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(.white)
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 44)
+        }
         .buttonStyle(.plain)
+    }
+
+    private func transportBtn(_ image: String,
+                               enabled: Bool,
+                               action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: image)
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(enabled ? Color.white : Color.white.opacity(0.3))
+                .frame(maxWidth: .infinity)
+                .frame(height: 44)
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+    }
+
+    private var syncBtn: some View {
+        Button { onSync?() } label: {
+            Image(systemName: "arrow.2.circlepath")
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(isMaster ? Color.white.opacity(0.2) : .white)
+                .frame(maxWidth: .infinity)
+                .frame(height: 44)
+        }
+        .buttonStyle(.plain)
+        .disabled(isMaster)
     }
 
     // ── Helpers ────────────────────────────────────────────────────────
@@ -284,7 +310,7 @@ struct CueStrip: View {
                         .font(.system(size: 15, weight: .medium, design: .rounded))
                         .foregroundStyle(.white)
                         .frame(maxWidth: .infinity)
-                        .frame(height: 40)
+                        .frame(maxHeight: .infinity)
                 }
                 .buttonStyle(.plain)
 
@@ -327,42 +353,5 @@ struct DeckScrubLine: View {
             )
             ctx.stroke(path, with: .color(.white), lineWidth: 1)
         }
-    }
-}
-
-// MARK: - Transport bar
-
-struct DeckTransportBar: View {
-    let isLoaded: Bool
-    let onPause: () -> Void
-    let onPlay:  () -> Void
-
-    var body: some View {
-        HStack(spacing: 0) {
-            btn("pause.fill", action: onPause)
-            Rectangle()
-                .fill(Color.white.opacity(0.12))
-                .frame(width: 0.5, height: 20)
-            btn("play.fill", action: onPlay)
-        }
-        .fixedSize()
-        .background(.ultraThinMaterial,
-                    in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(Color.white.opacity(0.14), lineWidth: 0.5)
-        )
-        .opacity(isLoaded ? 1 : 0.35)
-        .disabled(!isLoaded)
-    }
-
-    private func btn(_ image: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: image)
-                .font(.system(size: 15, weight: .medium))
-                .foregroundStyle(Color.primary)
-                .frame(width: 52, height: 36)
-        }
-        .buttonStyle(.plain)
     }
 }
