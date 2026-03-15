@@ -125,14 +125,29 @@ final class MixEngine: ObservableObject {
                 if let u = urlB { try? dB.load(bodyURL: u, loopCount: loops) }
             }
 
+            // Set BPM and reset beat position immediately — these are nonisolated(unsafe)
+            // writes so they don't need the main actor.
+            cA.bpm = bpm;  cB.bpm = bpm
+            cA.setBeatPosition(0); cB.setBeatPosition(0)
+
+            // Start audio playback NOW, before the MainActor round-trip.
+            // This eliminates the 0-8 ms silence gap that appeared when the main
+            // thread was busy with a 120 Hz run-loop cycle.  The guard on
+            // isGloballyPlaying below will pause again if the user had already
+            // tapped pause before we got here.
+            if self.isGloballyPlaying {
+                dA.play(); dB.play()
+            }
+
             await MainActor.run { [weak self] in
                 guard let self else { return }
-                cA.bpm = bpm;  cB.bpm = bpm      // sync clock speed to actual song tempo
-                cA.setBeatPosition(0); cB.setBeatPosition(0)
                 phase = target
-                guard isGloballyPlaying else { return }
-                cA.start(); cB.start()
-                dA.play(); dB.play()
+                if isGloballyPlaying {
+                    cA.start(); cB.start()
+                } else {
+                    // Paused between commit and main-actor — undo the early play()
+                    dA.pause(); dB.pause()
+                }
             }
 
             self.stageNextPhase(currentSA: sA, currentSB: sB, justStartedLead: isLead)
