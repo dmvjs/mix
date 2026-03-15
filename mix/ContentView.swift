@@ -31,6 +31,26 @@ struct ContentView: View {
 
     private var isAnythingPlaying: Bool { deckA.isPlaying || deckB.isPlaying }
 
+    // MARK: - Sync actions
+
+    /// Snap deck A to wherever B currently is (only useful when B is master).
+    private func syncA() {
+        guard deckB.isPlaying else { return }
+        clockA.syncTo(clockB)
+        let total = clockB.beatsPerLoop * 4
+        let pos = clockB.beatPosition.truncatingRemainder(dividingBy: total)
+        deckA.seekToAbsoluteFraction(max(0, pos) / total)
+    }
+
+    /// Snap deck B to wherever A currently is (only useful when A is master).
+    private func syncB() {
+        guard deckA.isPlaying else { return }
+        clockB.syncTo(clockA)
+        let total = clockA.beatsPerLoop * 4
+        let pos = clockA.beatPosition.truncatingRemainder(dividingBy: total)
+        deckB.seekToAbsoluteFraction(max(0, pos) / total)
+    }
+
     // MARK: - Body
 
     var body: some View {
@@ -46,12 +66,16 @@ struct ContentView: View {
                 // ── Two decks side-by-side ────────────────────────────
                 HStack(spacing: 0) {
                     DeckView(label: "A",
+                             isMaster: deckA.isPlaying,
+                             onSync: syncA,
                              clock: clockA, deck: deckA,
                              currentSong: $songA)
 
                     Color(white: 0.15).frame(width: 0.5)
 
                     DeckView(label: "B",
+                             isMaster: deckB.isPlaying && !deckA.isPlaying,
+                             onSync: syncB,
                              clock: clockB, deck: deckB,
                              currentSong: $songB)
                 }

@@ -12,12 +12,16 @@ final class DJAudioEngine: ObservableObject {
 
     @Published var isLoaded:  Bool = false
     @Published var isPlaying: Bool = false
+    @Published private(set) var waveform: [Float] = []   // downsampled peaks, main-thread safe
 
     // Audio data — immutable after load, safe from any thread
     private var leftSamples:  [Float] = []
     private var rightSamples: [Float] = []
     nonisolated(unsafe) private var framesTotal:   Int    = 0
     nonisolated(unsafe) private var framesPerLoop: Int    = 0
+
+    /// Public read of total frame count for waveform display.
+    var framesCount: Int { framesTotal }
 
     // Render-thread owned
     nonisolated(unsafe) private var renderPos:      Double = 0
@@ -62,7 +66,20 @@ final class DJAudioEngine: ObservableObject {
             : leftSamples
 
         try buildSourceNode(format: format)
+        waveform = makeWaveform()
         isLoaded = true
+    }
+
+    private func makeWaveform(buckets: Int = 1400) -> [Float] {
+        guard framesTotal > 0 else { return [] }
+        let step = max(1, framesTotal / buckets)
+        return (0..<buckets).map { i in
+            let start = i * step
+            let end   = min(start + step, framesTotal)
+            var peak: Float = 0
+            for j in start..<end { peak = max(peak, abs(leftSamples[j])) }
+            return peak
+        }
     }
 
     // MARK: - Transport
@@ -100,6 +117,12 @@ final class DJAudioEngine: ObservableObject {
     func seekToQuarter(_ quarter: Int) {
         guard framesPerLoop > 0 else { return }
         pendingSeek = quarter * framesPerLoop
+    }
+
+    /// Seek to a fraction 0–1 of the total file length (all 4 loops).
+    func seekToAbsoluteFraction(_ fraction: Double) {
+        guard framesTotal > 0 else { return }
+        pendingSeek = Int(fraction * Double(framesTotal))
     }
 
     var loopFraction: Double {

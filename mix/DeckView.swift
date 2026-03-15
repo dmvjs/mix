@@ -4,6 +4,8 @@ import SwiftUI
 
 struct DeckView: View {
     let label: String
+    var isMaster: Bool = false
+    var onSync: (() -> Void)? = nil
 
     @ObservedObject var clock: MasterClock
     @ObservedObject var deck:  DJAudioEngine
@@ -18,13 +20,13 @@ struct DeckView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // ── Scrub zone ─────────────────────────────────────────────
+            // ── Scrub zone — clean gesture area ───────────────────────
             GeometryReader { geo in
                 ZStack {
                     DeckScrubLine(offset: lineOffset)
                         .allowsHitTesting(false)
 
-                    // Deck label – top leading
+                    // Deck label – top leading corner only
                     VStack {
                         HStack {
                             Text(label)
@@ -36,22 +38,6 @@ struct DeckView: View {
                         }
                         Spacer()
                     }
-
-                    // Controls – centered
-                    VStack(spacing: 10) {
-                        MasterWheelView(angle: clock.angle,
-                                        loopIndex: clock.loopIndex,
-                                        size: 48)
-
-                        loadButton
-
-                        DeckTransportBar(
-                            isLoaded: deck.isLoaded,
-                            onPause: { clock.stop();  deck.pause() },
-                            onPlay:  { clock.start(); deck.play()  }
-                        )
-                    }
-                    .fixedSize()
                 }
                 .contentShape(Rectangle())
                 .gesture(
@@ -85,12 +71,62 @@ struct DeckView: View {
                 )
             }
 
-            // ── Cue strip ──────────────────────────────────────────────
+            // ── Waveform strip ────────────────────────────────────────
+            WaveformStrip(waveform: deck.waveform,
+                          currentFrame: deck.currentFrame,
+                          framesTotal: deck.framesCount)
+                .frame(height: 44)
+                .clipped()
+
+            // ── Info row: wheel + song + sync ─────────────────────────
+            HStack(spacing: 10) {
+                MasterWheelView(angle: clock.angle,
+                                loopIndex: clock.loopIndex,
+                                size: 36)
+                    .opacity(deck.isLoaded ? 1 : 0.3)
+
+                loadButton
+
+                Spacer()
+
+                // Sync button — disabled when this deck is the master
+                if onSync != nil {
+                    Button {
+                        onSync?()
+                    } label: {
+                        Image(systemName: "arrow.2.circlepath")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(isMaster ? Color.white.opacity(0.2) : .white)
+                            .frame(width: 34, height: 34)
+                            .background(.ultraThinMaterial, in: Circle())
+                            .overlay(
+                                Circle()
+                                    .stroke(Color.white.opacity(isMaster ? 0.06 : 0.14),
+                                            lineWidth: 0.5)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isMaster)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+
+            // ── Transport — just above cue strip ──────────────────────
+            DeckTransportBar(
+                isLoaded: deck.isLoaded,
+                onPause: { clock.stop();  deck.pause() },
+                onPlay:  { clock.start(); deck.play()  }
+            )
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 10)
+            .padding(.bottom, 6)
+
+            // ── Cue strip ─────────────────────────────────────────────
             CueStrip(isLoaded: deck.isLoaded) { quarter in
                 cue(quarter)
             }
             .padding(.horizontal, 10)
-            .padding(.top, 8)
             .padding(.bottom, 12)
         }
         .sheet(isPresented: $showPicker) {
@@ -172,6 +208,63 @@ struct DeckView: View {
         deck.pause()
         try? deck.load(bodyURL: url, loopCount: 4)
         currentSong = song
+    }
+}
+
+// MARK: - Waveform strip
+
+struct WaveformStrip: View {
+    let waveform: [Float]
+    let currentFrame: Int
+    let framesTotal: Int
+
+    // Loop colors: each of the 4 body loops gets its own identity hue
+    private static let loopHues: [Double] = [0.60, 0.55, 0.33, 0.08]  // blue, teal, green, amber
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30)) { _ in
+            Canvas { ctx, size in
+                guard !waveform.isEmpty, framesTotal > 0 else { return }
+
+                let buckets   = waveform.count
+                let barW: CGFloat  = 2
+                let gap: CGFloat   = 1
+                let stride         = barW + gap
+                let halfBars       = Int(size.width / stride / 2) + 2
+                let progress       = Double(currentFrame) / Double(framesTotal)
+                let centerBucket   = Int(progress * Double(buckets))
+
+                for offset in -halfBars ... halfBars {
+                    let raw    = centerBucket + offset
+                    let bucket = ((raw % buckets) + buckets) % buckets
+                    let amp    = CGFloat(waveform[bucket])
+                    let barH   = max(2, amp * size.height * 0.88)
+                    let x      = size.width / 2 + CGFloat(offset) * stride
+                    let y      = (size.height - barH) / 2
+
+                    // Color by which of the 4 loops this bucket falls in
+                    let loopIdx = Int(Double(bucket) / Double(buckets) * 4) % 4
+                    let hue     = Self.loopHues[loopIdx]
+                    let isPast  = offset < 0
+                    let color   = Color(hue: hue,
+                                        saturation: isPast ? 0.4 : 0.65,
+                                        brightness: isPast ? 0.5 : 1.0)
+                                  .opacity(isPast ? 0.35 : 0.8)
+
+                    var bar = Path()
+                    bar.addRoundedRect(in: CGRect(x: x - barW / 2, y: y,
+                                                  width: barW, height: barH),
+                                       cornerSize: CGSize(width: 1, height: 1))
+                    ctx.fill(bar, with: .color(color))
+                }
+
+                // Playhead — bright white hairline at center
+                var ph = Path()
+                ph.move(to: CGPoint(x: size.width / 2, y: 0))
+                ph.addLine(to: CGPoint(x: size.width / 2, y: size.height))
+                ctx.stroke(ph, with: .color(.white.opacity(0.9)), lineWidth: 1.5)
+            }
+        }
     }
 }
 
