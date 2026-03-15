@@ -65,4 +65,9 @@ final class MasterClock: ObservableObject {
     }
 
     var angle: Double { loopFraction * 2 * .pi }
+
+    /// Jump to a quarter position (0–3) in the 4-loop body.
+    func jumpToQuarter(_ quarter: Int) {
+        beatPosition = Double(quarter) * beatsPerLoop
+    }
 }

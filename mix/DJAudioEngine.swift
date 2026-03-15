@@ -96,6 +96,12 @@ final class DJAudioEngine: ObservableObject {
         pendingSeek = Int(fraction * Double(framesPerLoop))
     }
 
+    /// Jump to one of four quarter positions (0–3) in the 4-loop body.
+    func seekToQuarter(_ quarter: Int) {
+        guard framesPerLoop > 0 else { return }
+        pendingSeek = quarter * framesPerLoop
+    }
+
     var loopFraction: Double {
         guard framesPerLoop > 0 else { return 0 }
         return Double(currentFrame % framesPerLoop) / Double(framesPerLoop)

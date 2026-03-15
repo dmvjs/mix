@@ -6,7 +6,7 @@ struct MasterWheelView: View {
     let angle:     Double   // 0 ..< 2π, position within current loop
     let loopIndex: Int      // 0-3, which body loop
 
-    private let size: CGFloat = 64
+    var size: CGFloat = 64
 
     var body: some View {
         ZStack {
