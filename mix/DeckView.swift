@@ -20,13 +20,16 @@ struct DeckView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // ── Scrub zone — clean gesture area ───────────────────────
+            // ── Scrub zone — waveform lives here, bezier floats on top ──
             GeometryReader { geo in
                 ZStack {
-                    DeckScrubLine(offset: lineOffset)
+                    // Waveform scrolls vertically with playback / scrub
+                    WaveformStrip(waveform: deck.waveform,
+                                  currentFrame: deck.currentFrame,
+                                  framesTotal: deck.framesCount)
                         .allowsHitTesting(false)
 
-                    // Deck label – top leading corner only
+                    // Deck label – top leading corner
                     VStack {
                         HStack {
                             Text(label)
@@ -38,6 +41,10 @@ struct DeckView: View {
                         }
                         Spacer()
                     }
+
+                    // Bezier scrub line on top
+                    DeckScrubLine(offset: lineOffset)
+                        .allowsHitTesting(false)
                 }
                 .contentShape(Rectangle())
                 .gesture(
@@ -70,13 +77,6 @@ struct DeckView: View {
                         }
                 )
             }
-
-            // ── Waveform strip ────────────────────────────────────────
-            WaveformStrip(waveform: deck.waveform,
-                          currentFrame: deck.currentFrame,
-                          framesTotal: deck.framesCount)
-                .frame(height: 44)
-                .clipped()
 
             // ── Info row: wheel + song + sync ─────────────────────────
             HStack(spacing: 10) {
@@ -211,58 +211,58 @@ struct DeckView: View {
     }
 }
 
-// MARK: - Waveform strip
+// MARK: - Waveform strip  (vertical — scrolls in the scrub direction)
+//
+// Each row = one time bucket. Bar WIDTH = amplitude. Time flows top→bottom
+// as playback advances: past content scrolls off the top, future rises from below.
+// The scrub gesture directly controls scroll speed and direction.
 
 struct WaveformStrip: View {
     let waveform: [Float]
     let currentFrame: Int
     let framesTotal: Int
 
-    // Loop colors: each of the 4 body loops gets its own identity hue
-    private static let loopHues: [Double] = [0.60, 0.55, 0.33, 0.08]  // blue, teal, green, amber
+    // Each of the 4 body loops has its own hue identity
+    private static let loopHues: [Double] = [0.60, 0.52, 0.33, 0.08]  // blue, teal, green, amber
 
     var body: some View {
         TimelineView(.animation(minimumInterval: 1.0 / 30)) { _ in
             Canvas { ctx, size in
                 guard !waveform.isEmpty, framesTotal > 0 else { return }
 
-                let buckets   = waveform.count
-                let barW: CGFloat  = 2
-                let gap: CGFloat   = 1
-                let stride         = barW + gap
-                let halfBars       = Int(size.width / stride / 2) + 2
-                let progress       = Double(currentFrame) / Double(framesTotal)
-                let centerBucket   = Int(progress * Double(buckets))
+                let buckets    = waveform.count
+                let rowH: CGFloat = 3
+                let gap: CGFloat  = 1
+                let stride        = rowH + gap
+                let halfRows      = Int(size.height / stride / 2) + 2
+                let progress      = Double(currentFrame) / Double(framesTotal)
+                let centerBucket  = Int(progress * Double(buckets))
+                let cy            = size.height / 2
 
-                for offset in -halfBars ... halfBars {
+                for offset in -halfRows ... halfRows {
                     let raw    = centerBucket + offset
                     let bucket = ((raw % buckets) + buckets) % buckets
                     let amp    = CGFloat(waveform[bucket])
-                    let barH   = max(2, amp * size.height * 0.88)
-                    let x      = size.width / 2 + CGFloat(offset) * stride
-                    let y      = (size.height - barH) / 2
 
-                    // Color by which of the 4 loops this bucket falls in
+                    // Horizontal bar, centered, width = amplitude
+                    let barW   = max(3, amp * size.width * 0.88)
+                    let x      = (size.width - barW) / 2
+                    let y      = cy + CGFloat(offset) * stride
+
                     let loopIdx = Int(Double(bucket) / Double(buckets) * 4) % 4
                     let hue     = Self.loopHues[loopIdx]
-                    let isPast  = offset < 0
+                    let isPast  = offset < 0   // above center = already played
                     let color   = Color(hue: hue,
-                                        saturation: isPast ? 0.4 : 0.65,
-                                        brightness: isPast ? 0.5 : 1.0)
-                                  .opacity(isPast ? 0.35 : 0.8)
+                                        saturation: isPast ? 0.25 : 0.55,
+                                        brightness: isPast ? 0.4  : 0.95)
+                                  .opacity(isPast ? 0.28 : 0.72)
 
                     var bar = Path()
-                    bar.addRoundedRect(in: CGRect(x: x - barW / 2, y: y,
-                                                  width: barW, height: barH),
+                    bar.addRoundedRect(in: CGRect(x: x, y: y - rowH / 2,
+                                                  width: barW, height: rowH),
                                        cornerSize: CGSize(width: 1, height: 1))
                     ctx.fill(bar, with: .color(color))
                 }
-
-                // Playhead — bright white hairline at center
-                var ph = Path()
-                ph.move(to: CGPoint(x: size.width / 2, y: 0))
-                ph.addLine(to: CGPoint(x: size.width / 2, y: size.height))
-                ctx.stroke(ph, with: .color(.white.opacity(0.9)), lineWidth: 1.5)
             }
         }
     }
