@@ -181,7 +181,8 @@ struct DeckView: View {
                         .stroke(Color.red.opacity(pulse ? 0.85 : 0.25), lineWidth: 1.5)
                         .frame(width: 30, height: 30)
                 }
-                Image(systemName: currentSong == nil ? "plus" : "arrow.triangle.2.circlepath")
+                // "music.note.list" = open library; distinct from sync's lock icon
+                Image(systemName: "music.note.list")
                     .font(.system(size: 14, weight: .medium))
                     .foregroundStyle(.white)
             }
@@ -207,12 +208,13 @@ struct DeckView: View {
 
     private var syncBtn: some View {
         Button { onSync?() } label: {
-            Image(systemName: "arrow.2.circlepath")
+            // lock.fill = actively locked, lock = available to lock
+            Image(systemName: syncLocked ? "lock.fill" : "lock")
                 .font(.system(size: 14, weight: .medium))
                 .foregroundStyle(syncLocked ? Color.green : isMaster ? Color.white.opacity(0.2) : .white)
                 .frame(maxWidth: .infinity)
                 .frame(height: 44)
-                .background(syncLocked ? Color.green.opacity(0.15) : Color.clear)
+                .background(syncLocked ? Color.green.opacity(0.12) : Color.clear)
         }
         .buttonStyle(.plain)
         .disabled(isMaster && !syncLocked)

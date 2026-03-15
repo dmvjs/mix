@@ -1,6 +1,17 @@
 import AVFoundation
 import Combine
 
+// MARK: - EQ settings (shared with UI)
+
+struct EQSettings: Equatable {
+    var high: Float = 0    // gain dB, -24 to +6
+    var mid:  Float = 0
+    var low:  Float = 0
+    var killHigh = false
+    var killMid  = false
+    var killLow  = false
+}
+
 /// One deck with professional-grade scratch DSP.
 ///
 /// Scratch model (from Mixxx/xwax research):
@@ -32,8 +43,6 @@ final class DJAudioEngine: ObservableObject {
     nonisolated(unsafe) private var scrubbing: Bool = false
 
     // Scratch accumulator: main thread adds, render thread drains.
-    // Each gesture update pushes delta frames; render spreads them over the buffer.
-    // Double r/w is atomic on arm64 at natural alignment.
     nonisolated(unsafe) private var scrubAccumulator: Double = 0
 
     // One-shot seek
@@ -42,10 +51,15 @@ final class DJAudioEngine: ObservableObject {
     // Read by main (UI only) — render writes
     nonisolated(unsafe) private(set) var currentFrame: Int = 0
 
-    private let engine = AVAudioEngine()
+    private let engine    = AVAudioEngine()
+    private let eqNode    = AVAudioUnitEQ(numberOfBands: 3)
+    private var eqReady   = false
     private var sourceNode: AVAudioSourceNode?
 
-    init() { setupAudioSession() }
+    init() {
+        setupAudioSession()
+        setupEQBands()
+    }
 
     // MARK: - Load
 
@@ -87,6 +101,18 @@ final class DJAudioEngine: ObservableObject {
     func play()  { playing = true;  isPlaying = true  }
     func pause() { playing = false; isPlaying = false }
 
+    // MARK: - Volume & EQ
+
+    func setVolume(_ v: Float) {
+        engine.mainMixerNode.volume = max(0, min(2, v))
+    }
+
+    func setEQ(_ s: EQSettings) {
+        eqNode.bands[2].gain = s.killHigh ? -96 : max(-24, min(6, s.high))
+        eqNode.bands[1].gain = s.killMid  ? -96 : max(-24, min(6, s.mid))
+        eqNode.bands[0].gain = s.killLow  ? -96 : max(-24, min(6, s.low))
+    }
+
     // MARK: - Scratch
 
     func startScrubbing() {
@@ -96,13 +122,11 @@ final class DJAudioEngine: ObservableObject {
     }
 
     func stopScrubbing() {
-        scrubAccumulator = 0   // drain immediately — no drag
+        scrubAccumulator = 0
         lastRenderRate   = 0
         scrubbing        = false
     }
 
-    /// Called each gesture update. Pushes delta frames into the accumulator.
-    /// Render drains the accumulator each buffer → dead-accurate position, zero lag.
     func scrubByAngleDelta(_ delta: Double) {
         guard framesPerLoop > 0 else { return }
         scrubAccumulator += (delta / (2 * .pi)) * Double(framesPerLoop)
@@ -113,13 +137,11 @@ final class DJAudioEngine: ObservableObject {
         pendingSeek = Int(fraction * Double(framesPerLoop))
     }
 
-    /// Jump to one of four quarter positions (0–3) in the 4-loop body.
     func seekToQuarter(_ quarter: Int) {
         guard framesPerLoop > 0 else { return }
         pendingSeek = quarter * framesPerLoop
     }
 
-    /// Seek to a fraction 0–1 of the total file length (all 4 loops).
     func seekToAbsoluteFraction(_ fraction: Double) {
         guard framesTotal > 0 else { return }
         pendingSeek = Int(fraction * Double(framesTotal))
@@ -139,6 +161,25 @@ final class DJAudioEngine: ObservableObject {
         #endif
     }
 
+    private func setupEQBands() {
+        // Low shelf 200 Hz
+        eqNode.bands[0].filterType = .lowShelf
+        eqNode.bands[0].frequency  = 200
+        eqNode.bands[0].gain       = 0
+        eqNode.bands[0].bypass     = false
+        // Mid parametric 1 kHz, Q = 1
+        eqNode.bands[1].filterType = .parametric
+        eqNode.bands[1].frequency  = 1000
+        eqNode.bands[1].bandwidth  = 1.0
+        eqNode.bands[1].gain       = 0
+        eqNode.bands[1].bypass     = false
+        // High shelf 8 kHz
+        eqNode.bands[2].filterType = .highShelf
+        eqNode.bands[2].frequency  = 8000
+        eqNode.bands[2].gain       = 0
+        eqNode.bands[2].bypass     = false
+    }
+
     private func buildSourceNode(format: AVAudioFormat) throws {
         engine.stop()
         if let old = sourceNode { engine.detach(old) }
@@ -156,17 +197,14 @@ final class DJAudioEngine: ObservableObject {
             let total    = Double(self.framesTotal)
             let totalInt = self.framesTotal
 
-            // Apply one-shot seek
             let seek = self.pendingSeek
             if seek >= 0 {
-                self.renderPos  = Double(seek)
+                self.renderPos   = Double(seek)
                 self.pendingSeek = -1
             }
 
-            // ── Determine playback rate ───────────────────────────────
             let rawRate: Double
             if self.scrubbing {
-                // Drain accumulator — spread delta frames evenly over this buffer
                 let acc = self.scrubAccumulator
                 self.scrubAccumulator -= acc
                 rawRate = acc / Double(fc)
@@ -177,26 +215,21 @@ final class DJAudioEngine: ObservableObject {
                 return noErr
             }
 
-            // Asymmetric IIR: instant deceleration, smoothed acceleration
-            // Prevents crackle on rate jumps while keeping the "grab" feel
             let prev = self.lastRenderRate
             let rate: Double
             if abs(rawRate) < abs(prev) {
-                rate = rawRate                          // decelerating — apply immediately
+                rate = rawRate
             } else {
-                rate = prev * 0.35 + rawRate * 0.65     // accelerating — smooth
+                rate = prev * 0.35 + rawRate * 0.65
             }
-            // Snap to zero below hearing threshold
             let finalRate = abs(rate) < 1e-4 ? 0.0 : rate
             self.lastRenderRate = finalRate
 
-            // ── Fill output with Hermite 4-point cubic interpolation ──
             var pos = self.renderPos
 
             self.leftSamples.withUnsafeBufferPointer  { lp in
             self.rightSamples.withUnsafeBufferPointer { rp in
                 for i in 0..<fc {
-                    // Wrap position into [0, total)
                     var p = pos.truncatingRemainder(dividingBy: total)
                     if p < 0 { p += total }
 
@@ -223,14 +256,17 @@ final class DJAudioEngine: ObservableObject {
 
         sourceNode = node
         engine.attach(node)
-        engine.connect(node, to: engine.mainMixerNode, format: format)
+        if !eqReady {
+            engine.attach(eqNode)
+            eqReady = true
+        }
+        engine.connect(node,   to: eqNode,               format: format)
+        engine.connect(eqNode, to: engine.mainMixerNode, format: format)
         try engine.start()
     }
 }
 
 // MARK: - Hermite 4-point cubic interpolation
-// Via Laurent de Soras / musicdsp.org — used in Mixxx and xwax.
-// Eliminates slope discontinuities that cause aliasing in linear interpolation.
 @inline(__always)
 private func hermite(_ mu: Float, _ xm1: Float, _ x0: Float, _ x1: Float, _ x2: Float) -> Float {
     let c    = (x1 - xm1) * 0.5
