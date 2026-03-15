@@ -4,9 +4,6 @@ import Combine
 // MARK: - EQ settings (shared with UI)
 
 struct EQSettings: Equatable {
-    var high: Float = 0    // gain dB, -24 to +6
-    var mid:  Float = 0
-    var low:  Float = 0
     var killHigh = false
     var killMid  = false
     var killLow  = false
@@ -108,9 +105,9 @@ final class DJAudioEngine: ObservableObject {
     }
 
     func setEQ(_ s: EQSettings) {
-        eqNode.bands[2].gain = s.killHigh ? -96 : max(-24, min(6, s.high))
-        eqNode.bands[1].gain = s.killMid  ? -96 : max(-24, min(6, s.mid))
-        eqNode.bands[0].gain = s.killLow  ? -96 : max(-24, min(6, s.low))
+        eqNode.bands[2].gain = s.killHigh ? -96 : 0
+        eqNode.bands[1].gain = s.killMid  ? -96 : 0
+        eqNode.bands[0].gain = s.killLow  ? -96 : 0
     }
 
     // MARK: - Scratch

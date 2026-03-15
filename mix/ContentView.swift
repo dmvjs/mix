@@ -10,11 +10,9 @@ struct ContentView: View {
     @State private var songA: Song?
     @State private var songB: Song?
 
-    // Persistent sync locks
     @State private var aLockedToB = false
     @State private var bLockedToA = false
 
-    // Channel controls
     @State private var volumeA: Double = 1.0
     @State private var volumeB: Double = 1.0
     @State private var eqA = EQSettings()
@@ -54,8 +52,6 @@ struct ContentView: View {
         slaveDeck.play()
     }
 
-    // Clock-only sync — no audio seek, avoids render-position discontinuities / clicks.
-    // Both engines play at rate 1.0 from the same hardware clock so they stay phase-locked.
     private func continuousSync(masterBeat: Double, slave: MasterClock) {
         guard !slave.isScrubbing else { return }
         slave.setBeatPosition(masterBeat)
@@ -81,11 +77,6 @@ struct ContentView: View {
                 Color(white: 0.15).frame(height: 0.5)
 
                 HStack(spacing: 0) {
-                    // Channel strip A (left edge)
-                    ChannelStrip(volume: $volumeA, eq: $eqA)
-
-                    Color(white: 0.12).frame(width: 0.5)
-
                     DeckView(label: "A",
                              isMaster: deckA.isPlaying && !aLockedToB,
                              syncLocked: aLockedToB,
@@ -101,14 +92,10 @@ struct ContentView: View {
                              onSync: toggleSyncB,
                              clock: clockB, deck: deckB,
                              currentSong: $songB)
-
-                    Color(white: 0.12).frame(width: 0.5)
-
-                    // Channel strip B (right edge)
-                    ChannelStrip(volume: $volumeB, eq: $eqB)
                 }
             }
         }
+        // Clock sync
         .onChange(of: clockA.absoluteBeat) { _, beat in
             guard bLockedToA else { return }
             continuousSync(masterBeat: beat, slave: clockB)
@@ -117,6 +104,14 @@ struct ContentView: View {
             guard aLockedToB else { return }
             continuousSync(masterBeat: beat, slave: clockA)
         }
+        // Auto-release lock when master stops — slave becomes independent master
+        .onChange(of: deckA.isPlaying) { _, playing in
+            if !playing && bLockedToA { bLockedToA = false }
+        }
+        .onChange(of: deckB.isPlaying) { _, playing in
+            if !playing && aLockedToB { aLockedToB = false }
+        }
+        // Channel controls
         .onChange(of: volumeA) { _, v in deckA.setVolume(Float(v)) }
         .onChange(of: volumeB) { _, v in deckB.setVolume(Float(v)) }
         .onChange(of: eqA)     { _, eq in deckA.setEQ(eq) }
@@ -127,6 +122,7 @@ struct ContentView: View {
 
     private var topBar: some View {
         ZStack {
+            // App name — centred at top
             VStack {
                 Text("cuts the music")
                     .font(.system(size: 10, weight: .semibold, design: .rounded))
@@ -134,175 +130,121 @@ struct ContentView: View {
                     .tracking(1)
                 Spacer()
             }
-            .padding(.top, 10)
+            .padding(.top, 8)
 
             HStack(spacing: 0) {
-                deckWheelBadge(clock: clockA, isPlaying: deckA.isPlaying, label: "A")
-                    .frame(maxWidth: .infinity)
+                // ── Deck A channel ──────────────────────────────────────
+                HStack(spacing: 8) {
+                    VerticalFader(value: $volumeA)
+                        .frame(width: 20)
 
+                    VStack(spacing: 5) {
+                        MasterWheelView(angle: clockA.angle, loopIndex: clockA.loopIndex, size: 40)
+                            .opacity(deckA.isPlaying ? 1 : 0.28)
+                        Text("A")
+                            .font(.system(size: 9, weight: .bold, design: .rounded))
+                            .foregroundStyle(Color.white.opacity(0.35))
+                        eqKills(eq: $eqA)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .trailing)
+                .padding(.trailing, 12)
+
+                // ── Master wheel ────────────────────────────────────────
                 VStack(spacing: 4) {
                     Text("MASTER")
                         .font(.system(size: 8, weight: .bold, design: .rounded))
                         .foregroundStyle(Color.white.opacity(0.2))
                         .tracking(2)
-                    MasterWheelView(angle: masterAngle,
-                                    loopIndex: masterLoopIndex,
-                                    size: 72)
+                    MasterWheelView(angle: masterAngle, loopIndex: masterLoopIndex, size: 72)
                         .opacity(isAnythingPlaying ? 1 : 0.22)
                     Text(masterLabel)
                         .font(.system(size: 9, weight: .bold, design: .rounded))
                         .foregroundStyle(Color.white.opacity(0.35))
                 }
 
-                deckWheelBadge(clock: clockB, isPlaying: deckB.isPlaying, label: "B")
-                    .frame(maxWidth: .infinity)
+                // ── Deck B channel ──────────────────────────────────────
+                HStack(spacing: 8) {
+                    VStack(spacing: 5) {
+                        MasterWheelView(angle: clockB.angle, loopIndex: clockB.loopIndex, size: 40)
+                            .opacity(deckB.isPlaying ? 1 : 0.28)
+                        Text("B")
+                            .font(.system(size: 9, weight: .bold, design: .rounded))
+                            .foregroundStyle(Color.white.opacity(0.35))
+                        eqKills(eq: $eqB)
+                    }
+
+                    VerticalFader(value: $volumeB)
+                        .frame(width: 20)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.leading, 12)
             }
-            .padding(.horizontal, 20)
+            .padding(.top, 20)   // clear the app name label
         }
         .padding(.vertical, 12)
         .frame(maxWidth: .infinity)
     }
 
-    private func deckWheelBadge(clock: MasterClock, isPlaying: Bool, label: String) -> some View {
-        VStack(spacing: 4) {
-            MasterWheelView(angle: clock.angle, loopIndex: clock.loopIndex, size: 40)
-                .opacity(isPlaying ? 1 : 0.28)
+    // H / M / L kill buttons — lit white when active
+    @ViewBuilder
+    private func eqKills(eq: Binding<EQSettings>) -> some View {
+        HStack(spacing: 3) {
+            killBtn("H", on: eq.killHigh)
+            killBtn("M", on: eq.killMid)
+            killBtn("L", on: eq.killLow)
+        }
+    }
+
+    private func killBtn(_ label: String, on binding: Binding<Bool>) -> some View {
+        Button { binding.wrappedValue.toggle() } label: {
             Text(label)
-                .font(.system(size: 9, weight: .bold, design: .rounded))
-                .foregroundStyle(Color.white.opacity(0.35))
+                .font(.system(size: 8, weight: .bold, design: .rounded))
+                .foregroundStyle(binding.wrappedValue ? Color.black : Color.white.opacity(0.45))
+                .frame(width: 20, height: 16)
+                .background(
+                    binding.wrappedValue ? Color.white : Color.white.opacity(0.10),
+                    in: RoundedRectangle(cornerRadius: 4)
+                )
         }
-    }
-}
-
-// MARK: - Channel strip (EQ + volume)
-
-struct ChannelStrip: View {
-    @Binding var volume: Double     // 0..1
-    @Binding var eq: EQSettings
-
-    var body: some View {
-        VStack(spacing: 0) {
-            // EQ bands — top section
-            VStack(spacing: 6) {
-                EQBandColumn(label: "H",
-                             gain: Binding(get: { eq.high }, set: { eq.high = $0 }),
-                             kill: Binding(get: { eq.killHigh }, set: { eq.killHigh = $0 }))
-                EQBandColumn(label: "M",
-                             gain: Binding(get: { eq.mid  }, set: { eq.mid  = $0 }),
-                             kill: Binding(get: { eq.killMid  }, set: { eq.killMid  = $0 }))
-                EQBandColumn(label: "L",
-                             gain: Binding(get: { eq.low  }, set: { eq.low  = $0 }),
-                             kill: Binding(get: { eq.killLow  }, set: { eq.killLow  = $0 }))
-            }
-            .padding(.horizontal, 6)
-            .padding(.top, 10)
-            .frame(height: 162)
-
-            Rectangle()
-                .fill(Color.white.opacity(0.08))
-                .frame(height: 0.5)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 6)
-
-            // Volume fader — remaining height
-            VerticalFader(value: $volume)
-                .padding(.horizontal, 10)
-                .padding(.bottom, 12)
-                .frame(maxHeight: .infinity)
-        }
-        .frame(width: 44)
-    }
-}
-
-// MARK: - EQ band column (kill button + mini vertical fader)
-
-struct EQBandColumn: View {
-    let label: String
-    @Binding var gain: Float   // -24 to +6 dB
-    @Binding var kill: Bool
-
-    private var faderValue: Double {
-        Double((gain + 24) / 30)   // 0 = -24dB, 0.8 = 0dB, 1 = +6dB
-    }
-
-    var body: some View {
-        HStack(spacing: 5) {
-            // Kill button
-            Button { kill.toggle() } label: {
-                Text(label)
-                    .font(.system(size: 7, weight: .bold, design: .rounded))
-                    .foregroundStyle(kill ? Color.black : Color.white.opacity(0.55))
-                    .frame(width: 14, height: 14)
-                    .background(
-                        kill ? Color.white : Color.white.opacity(0.12),
-                        in: RoundedRectangle(cornerRadius: 3)
-                    )
-            }
-            .buttonStyle(.plain)
-
-            // Mini fader
-            VerticalFader(
-                value: Binding(
-                    get:  { faderValue },
-                    set:  { gain = Float($0) * 30 - 24 }
-                ),
-                knobH: 8,
-                dimmed: kill
-            )
-            .frame(maxHeight: .infinity)
-        }
-        .frame(maxWidth: .infinity)
+        .buttonStyle(.plain)
     }
 }
 
 // MARK: - Vertical fader
 
 struct VerticalFader: View {
-    @Binding var value: Double   // 0..1
-    var knobH: CGFloat = 24
-    var dimmed: Bool = false
+    @Binding var value: Double   // 0..1, 1 = top (full)
 
     var body: some View {
         GeometryReader { geo in
-            let h = geo.size.height
-            let knobY = h * (1 - CGFloat(value)) - knobH / 2
+            let h      = geo.size.height
+            let knobH: CGFloat = 26
+            let travel = h - knobH
+            // knob y-offset from centre of the GeometryReader frame
+            let offset = travel * (0.5 - CGFloat(value))
 
-            ZStack(alignment: .topLeading) {
+            ZStack {
                 // Track
                 Capsule()
-                    .fill(Color.white.opacity(dimmed ? 0.04 : 0.10))
+                    .fill(Color.white.opacity(0.10))
                     .frame(width: 3)
-                    .frame(maxHeight: .infinity)
-                    .frame(maxWidth: .infinity)
-
-                // Fill below knob
-                VStack(spacing: 0) {
-                    Spacer()
-                    Capsule()
-                        .fill(Color.white.opacity(dimmed ? 0.08 : 0.35))
-                        .frame(width: 3)
-                        .frame(height: h * CGFloat(value))
-                }
-                .frame(maxWidth: .infinity)
 
                 // Knob
-                RoundedRectangle(cornerRadius: 4)
+                RoundedRectangle(cornerRadius: 5)
                     .fill(.ultraThinMaterial)
                     .overlay(
-                        RoundedRectangle(cornerRadius: 4)
-                            .stroke(Color.white.opacity(dimmed ? 0.1 : 0.28), lineWidth: 0.5)
+                        RoundedRectangle(cornerRadius: 5)
+                            .stroke(Color.white.opacity(0.28), lineWidth: 0.5)
                     )
-                    .frame(width: 22, height: knobH)
-                    .frame(maxWidth: .infinity)
-                    .offset(y: max(0, min(h - knobH, knobY)))
-                    .opacity(dimmed ? 0.4 : 1)
+                    .frame(width: 20, height: knobH)
+                    .offset(y: offset)
             }
             .contentShape(Rectangle())
             .gesture(
                 DragGesture(minimumDistance: 0, coordinateSpace: .local)
-                    .onChanged { drag in
-                        let v = 1.0 - Double(drag.location.y / h)
-                        value = max(0, min(1, v))
+                    .onChanged { g in
+                        value = max(0, min(1, 1.0 - Double(g.location.y / h)))
                     }
             )
         }
