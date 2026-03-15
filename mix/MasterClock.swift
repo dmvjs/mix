@@ -71,6 +71,11 @@ final class MasterClock: ObservableObject {
         beatPosition = Double(quarter) * beatsPerLoop
     }
 
+    /// Set beat position directly (used for sync).
+    func setBeatPosition(_ pos: Double) {
+        beatPosition = pos
+    }
+
     /// Snap this clock to the same absolute position as another clock.
     func syncTo(_ other: MasterClock) {
         beatPosition = other.beatPosition
